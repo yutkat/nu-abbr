@@ -1,6 +1,6 @@
 # Minimal config to try nu-abbr without any other customization:
 #
-#   nu --config examples/minimal-config.nu
+#   XDG_CONFIG_HOME=$(mktemp -d) nu --config examples/minimal-config.nu
 #
 # In your own config.nu, replace the path below with where you cloned the repo,
 # or put the clone's parent directory in $env.NU_LIB_DIRS and `use nu-abbr`.

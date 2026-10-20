@@ -60,7 +60,7 @@ nu-abbr enable
 `use` alone changes nothing. To try it without your own configuration:
 
 ```sh
-nu --config examples/minimal-config.nu
+XDG_CONFIG_HOME=$(mktemp -d) nu --config examples/minimal-config.nu
 ```
 
 ## Usage
