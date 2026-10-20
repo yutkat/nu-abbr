@@ -1,0 +1,45 @@
+---
+on:
+  push:
+    branches: [main]
+  pull_request:
+name: ci
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hustcer/setup-nu@v3
+        with:
+          check-latest: true
+      - run: nu tests/run.nu
+  parse-check:
+    name: parse-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hustcer/setup-nu@v3
+        with:
+          check-latest: true
+      # `nu --ide-check` always exits 0, so fail on its Error diagnostics instead.
+      - shell: nu {0}
+        run: |
+          let root = pwd
+          let errors = glob **/*.nu --exclude [**/.git/**] | each {|file|
+            ^nu -n -I $root --ide-check 100 $file
+            | lines
+            | each { from json }
+            | where type == diagnostic and severity == Error
+            | uniq
+            | each {|d|
+              let line = open --raw $file | into binary | bytes at 0..<($d.span.start) | decode utf-8 | split row "\n" | length
+              $"::error file=($file | path relative-to $root),line=($line)::($d.message)"
+            }
+          } | flatten
+          $errors | each { print $in }
+          if ($errors | is-not-empty) { exit 1 }

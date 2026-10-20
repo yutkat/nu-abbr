@@ -1,0 +1,7 @@
+{
+    name: nu-abbr
+    type: module
+    version: "0.1.0"
+    description: "Fish-like abbreviations for Nushell."
+    license: "LICENSE"
+}
