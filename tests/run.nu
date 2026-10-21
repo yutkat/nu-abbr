@@ -362,6 +362,28 @@ def "test interactive disable twice keeps the hook until swept" [] {
     assert equal $r {hook: true, native: {}, after: false}
 }
 
+def "test interactive closures are first evaluated by the hook" [] {
+    let r = interactive '
+        $env.config.abbreviations = {here: "my own"}
+        nu-abbr add gs "git status --short"
+        nu-abbr add here {|| "now" }
+        nu-abbr enable
+        let enabled = $env.config.abbreviations
+        nu-abbr add later {|| "later" }
+        let added = $env.config.abbreviations
+        run-hook
+        let hooked = $env.config.abbreviations
+        let replaced = nu-abbr status | get replaced
+        nu-abbr disable
+        {enabled: $enabled, added: $added, hooked: $hooked, replaced: $replaced, disabled: $env.config.abbreviations} | to nuon
+    '
+    assert equal $r.enabled {here: "my own", gs: "git status --short"}
+    assert equal $r.added $r.enabled
+    assert equal $r.hooked {here: now, gs: "git status --short", later: later}
+    assert equal $r.replaced [here]
+    assert equal $r.disabled {here: "my own", gs: gs, later: later}
+}
+
 # --- runner -----------------------------------------------------------------
 
 # Each test runs in its own closure, so `$env` changes do not leak between
@@ -395,6 +417,7 @@ const TESTS = [
     "test interactive add takes over its placeholder"
     "test interactive placeholder changed by the user is left alone"
     "test interactive disable twice keeps the hook until swept"
+    "test interactive closures are first evaluated by the hook"
 ]
 
 def run-test [name: string]: nothing -> any {
@@ -428,6 +451,7 @@ def run-test [name: string]: nothing -> any {
             "test interactive add takes over its placeholder" => { test interactive add takes over its placeholder }
             "test interactive placeholder changed by the user is left alone" => { test interactive placeholder changed by the user is left alone }
             "test interactive disable twice keeps the hook until swept" => { test interactive disable twice keeps the hook until swept }
+            "test interactive closures are first evaluated by the hook" => { test interactive closures are first evaluated by the hook }
             _ => (error make {msg: $"no such test: ($name)"})
         }
         null

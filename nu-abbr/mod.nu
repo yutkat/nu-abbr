@@ -24,8 +24,22 @@ def is-ours []: any -> bool {
     ($hook | describe | str starts-with "record") and ($hook.name? == $HOOK_NAME)
 }
 
+# The hook runs as a closure so it assigns `$env` directly: each call of a
+# `def --env` command is far slower than a plain one, so the helpers below
+# take the state and return the new values instead.
 def hook []: nothing -> record {
-    {name: $HOOK_NAME, code: {|| sweep; sync; retire }}
+    {name: $HOOK_NAME, code: {||
+        let r = sweep (state) $env.config.abbreviations
+        let r = sync $r.st $r.native false
+        $env.__NU_ABBR = $r.st
+        if $r.native != $env.config.abbreviations {
+            $env.config.abbreviations = $r.native
+        }
+        let hooks = retire $r.st $env.config.hooks.pre_prompt?
+        if $hooks != null {
+            $env.config.hooks.pre_prompt = $hooks
+        }
+    }}
 }
 
 def null-device []: nothing -> string {
@@ -47,40 +61,49 @@ def evaluate [name: string, expansion: any]: nothing -> string {
     try { $result | into string | str replace --regex '\n+$' '' } catch { $name }
 }
 
-# Remove a name nu-abbr wrote from `$env.config.abbreviations`, restoring the
-# user's entry it replaced. An entry changed after nu-abbr wrote it is kept.
+# Remove a name nu-abbr wrote from `native` (the abbreviations record),
+# restoring the user's entry it replaced. An entry changed after nu-abbr wrote
+# it is kept. Returns the new `{st, native}`.
 #
 # Nushell only ever adds `$env.config.abbreviations` entries to the running
 # line editor, so a deleted entry would keep expanding until Nushell restarts.
 # In an interactive session the entry is therefore first set to the name
 # itself, and `sweep` deletes it once the line editor has picked that up.
-def --env forget [name: string]: nothing -> nothing {
-    let st = state
+def forget [st: record, native: record, name: string]: nothing -> record {
     let k = key $name
     let mine = $st.written | get --optional $k
     let saved = $st.saved | get --optional $k
     mut pending = $st.pending
-    if $mine != null and ($env.config.abbreviations | get --optional $k) == $mine {
-        $env.config.abbreviations = if $saved != null {
-            $env.config.abbreviations | upsert $k $saved
+    mut native = $native
+    if $mine != null and ($native | get --optional $k) == $mine {
+        $native = if $saved != null {
+            $native | upsert $k $saved
         } else if $nu.is-interactive {
             $pending = $pending | upsert $k false
-            $env.config.abbreviations | upsert $k $name
+            $native | upsert $k $name
         } else {
-            $env.config.abbreviations | reject $k
+            $native | reject $k
         }
     }
     let written = if $mine == null { $st.written } else { $st.written | reject $k }
     let saved = if $saved == null { $st.saved } else { $st.saved | reject $k }
-    $env.__NU_ABBR = $st | upsert written $written | upsert saved $saved | upsert pending $pending
+    {st: ($st | upsert written $written | upsert saved $saved | upsert pending $pending), native: $native}
+}
+
+# Forget everything nu-abbr wrote and mark it disabled. Returns `{st, native}`.
+def stop [st: record, native: record]: nothing -> record {
+    mut r = {st: $st, native: $native}
+    for name in ($st.written | columns) {
+        $r = forget $r.st $r.native $name
+    }
+    {st: ($r.st | upsert enabled false | upsert written {} | upsert saved {}), native: $r.native}
 }
 
 # Delete the placeholder entries `forget` left, one prompt after the line
 # editor has seen them. Placeholders changed by something else are dropped
-# from the list and left alone.
-def --env sweep []: nothing -> nothing {
-    let st = state
-    mut native = $env.config.abbreviations
+# from the list and left alone. Returns `{st, native}`.
+def sweep [st: record, native: record]: nothing -> record {
+    mut native = $native
     mut pending = {}
     for p in ($st.pending | transpose name seen) {
         let k = key $p.name
@@ -93,27 +116,27 @@ def --env sweep []: nothing -> nothing {
             $pending = $pending | upsert $k true
         }
     }
-    if $native != $env.config.abbreviations {
-        $env.config.abbreviations = $native
-    }
-    $env.__NU_ABBR = $st | upsert pending $pending
+    {st: ($st | upsert pending $pending), native: $native}
 }
 
-# Write every abbreviation into `$env.config.abbreviations` while enabled.
+# Write every abbreviation into `native` while enabled. Returns `{st, native}`.
 #
 # Runs on enable, on add, and before every prompt, so closures follow the
 # current directory and entries come back after the record is reassigned.
-# An entry the user changed after nu-abbr wrote it is left alone.
-def --env sync []: nothing -> nothing {
-    let st = state
+# An entry the user changed after nu-abbr wrote it is left alone. With
+# `defer`, closure-backed entries are skipped and left to the next hook run.
+def sync [st: record, native: record, defer: bool]: nothing -> record {
     if not $st.enabled {
-        return
+        return {st: $st, native: $native}
     }
-    mut native = $env.config.abbreviations
+    mut native = $native
     mut written = $st.written
     mut saved = $st.saved
     mut pending = $st.pending
     for a in $st.abbrs {
+        if $defer and ($a.expansion | describe) == closure {
+            continue
+        }
         let k = key $a.name
         let current = $native | get --optional $k
         let mine = $written | get --optional $k
@@ -133,24 +156,18 @@ def --env sync []: nothing -> nothing {
         $native = $native | upsert $k $value
         $written = $written | upsert $k $value
     }
-    if $native != $env.config.abbreviations {
-        $env.config.abbreviations = $native
-    }
-    $env.__NU_ABBR = $st | upsert written $written | upsert saved $saved | upsert pending $pending
+    {st: ($st | upsert written $written | upsert saved $saved | upsert pending $pending), native: $native}
 }
 
-# Remove the hook once nu-abbr is disabled and no placeholder is left.
-def --env retire []: nothing -> nothing {
-    let st = state
-    if not $st.enabled and ($st.pending | is-empty) {
-        remove-hook
+# The pre_prompt hooks without nu-abbr's once it is disabled and no
+# placeholder is left, or null when nothing changes.
+def retire [st: record, hooks: any]: nothing -> any {
+    if $st.enabled or ($st.pending | is-not-empty) {
+        return null
     }
-}
-
-def --env remove-hook []: nothing -> nothing {
-    let hooks = $env.config.hooks.pre_prompt? | default []
+    let hooks = $hooks | default []
     if ($hooks | any {|h| $h | is-ours }) {
-        $env.config.hooks.pre_prompt = $hooks | where {|h| not ($h | is-ours) }
+        $hooks | where {|h| not ($h | is-ours) }
     }
 }
 
@@ -165,7 +182,8 @@ def validate-name [name: string]: nothing -> nothing {
 # The word expands when it is followed by Space or Enter, unless it is inside
 # a string or an argument of an external command (Reedline's rule). With a
 # closure, the expansion is its output, recomputed before every prompt; when
-# the closure fails or returns null, the word does not expand.
+# the closure fails or returns null, the word does not expand. In an
+# interactive session a closure first runs before the next prompt.
 @example "Expand `gs` to `git status --short`" {nu-abbr add gs "git status --short"}
 @example "Expand `~~` to the relative path of the git repository root" {nu-abbr add "~~" {|| let p = (git rev-parse --show-cdup); if $p == "" { "." } else { $p } }}
 export def --env add [
@@ -180,8 +198,16 @@ export def --env add [
     } else {
         $st.abbrs | append $entry
     }
-    $env.__NU_ABBR = $st | upsert abbrs $abbrs
-    sync
+    let st = $st | upsert abbrs $abbrs
+    if not $st.enabled {
+        $env.__NU_ABBR = $st
+        return
+    }
+    let r = sync $st $env.config.abbreviations $nu.is-interactive
+    $env.__NU_ABBR = $r.st
+    if $r.native != $env.config.abbreviations {
+        $env.config.abbreviations = $r.native
+    }
 }
 
 # Remove abbreviations added with `nu-abbr add`.
@@ -195,11 +221,14 @@ export def --env erase [
     if ($unknown | is-not-empty) {
         error make {msg: $"no such abbreviation: ($unknown | str join ', ')"}
     }
+    mut r = {st: (state), native: $env.config.abbreviations}
     for name in $names {
-        forget $name
+        $r = forget $r.st $r.native $name
     }
-    let st = state
-    $env.__NU_ABBR = $st | upsert abbrs ($st.abbrs | where name not-in $names)
+    $env.__NU_ABBR = $r.st | upsert abbrs ($r.st.abbrs | where name not-in $names)
+    if $r.native != $env.config.abbreviations {
+        $env.config.abbreviations = $r.native
+    }
 }
 
 # List the abbreviations added with `nu-abbr add`.
@@ -228,16 +257,23 @@ export def list []: nothing -> table<name: string, expansion: string, eval: bool
 # Writes them into `$env.config.abbreviations` and installs a pre_prompt hook
 # that keeps them there and recomputes closure expansions. Running it again
 # replaces the previous installation instead of adding duplicates.
+#
+# In an interactive session closure expansions are first computed by the hook
+# before the next prompt, so they do not run twice at startup.
 export def --env enable []: nothing -> nothing {
     if "abbreviations" not-in ($env.config | columns) {
         error make {msg: "this Nushell has no $env.config.abbreviations; nu-abbr needs Nushell 0.116 or newer"}
     }
-    if (state).enabled { disable }
+    let st = state
+    let r = if $st.enabled { stop $st $env.config.abbreviations } else { {st: $st, native: $env.config.abbreviations} }
+    let r = sync ($r.st | upsert enabled true) $r.native $nu.is-interactive
 
     let others = $env.config.hooks.pre_prompt? | default [] | where {|h| not ($h | is-ours) }
     $env.config.hooks.pre_prompt = $others | append (hook)
-    $env.__NU_ABBR = state | upsert enabled true
-    sync
+    $env.__NU_ABBR = $r.st
+    if $r.native != $env.config.abbreviations {
+        $env.config.abbreviations = $r.native
+    }
 }
 
 # Disable the abbreviations and remove what enable added.
@@ -251,13 +287,21 @@ export def --env enable []: nothing -> nothing {
 # this: until then each entry maps the name to itself, because the line
 # editor would keep expanding a deleted entry until Nushell restarts.
 export def --env disable []: nothing -> nothing {
-    if (state).enabled {
-        for name in (state | get written | columns) {
-            forget $name
+    let st = state
+    let st = if $st.enabled {
+        let r = stop $st $env.config.abbreviations
+        $env.__NU_ABBR = $r.st
+        if $r.native != $env.config.abbreviations {
+            $env.config.abbreviations = $r.native
         }
-        $env.__NU_ABBR = state | upsert enabled false | upsert written {} | upsert saved {}
+        $r.st
+    } else {
+        $st
     }
-    retire
+    let hooks = retire $st $env.config.hooks.pre_prompt?
+    if $hooks != null {
+        $env.config.hooks.pre_prompt = $hooks
+    }
 }
 
 # Show whether nu-abbr is enabled and what it installed.

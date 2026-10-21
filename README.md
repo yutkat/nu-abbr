@@ -114,10 +114,11 @@ abbreviation, so an unexpanded `gs` would run the `gs` program instead.
 nu-abbr add "~~" {|| let p = (git rev-parse --show-cdup); if $p == "" { "." } else { $p } }
 ```
 
-The closure runs on enable, on add and before every prompt (the working
-directory cannot change while you edit a line), so keep it fast. Its stderr
-is discarded and trailing newlines are dropped, like `$(...)` in a shell.
-When it fails or returns null, the word does not expand.
+The closure runs before every prompt (the working directory cannot change
+while you edit a line), so keep it fast. Outside an interactive session (a
+script) it also runs on enable and on add. Its stderr is discarded and
+trailing newlines are dropped, like `$(...)` in a shell. When it fails or
+returns null, the word does not expand.
 
 The hook is a `pre_prompt` entry named `nu_abbr_sync`. `enable` and `disable`
 only add or remove that entry; your other hooks, including ones from other
